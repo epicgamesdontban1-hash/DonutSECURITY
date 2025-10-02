@@ -64,7 +64,7 @@ class MinecraftDiscordBot {
 
         // Enhanced Safety features
         this.safetyConfig = {
-            enabled: false, // toggle safety monitoring
+            enabled: true, // toggle safety monitoring
             proximityRadius: 50, // blocks
             minHealth: 10, // health points (out of 20)
             alertCooldown: 30000, // 30 seconds between alerts
