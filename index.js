@@ -93,12 +93,9 @@ class MinecraftDiscordBot {
         this.setupSlashCommands();
     }
 
-async start() {
+    async start() {
         try {
-            // Start web server FIRST so Render detects the port immediately
-            await this.startWebServer();
-
-            // Then start Discord bot
+            // Start Discord bot first
             await this.discordClient.login(CONFIG.discord.token);
             console.log('✅ Discord bot connected successfully!');
 
@@ -113,11 +110,6 @@ async start() {
                     this.updateDiscordActivity();
                 }
             }, 30000);
-
-        } catch (error) {
-            console.error('Failed to start services:', error);
-        }
-    }
 
             // Start web server after Discord bot is ready
             await this.startWebServer();
