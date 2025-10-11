@@ -1,9 +1,17 @@
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
+// ============================================================================
+// DOGGO - Minecraft Discord Bot
+// ============================================================================
+
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const mineflayer = require('mineflayer');
 const express = require('express');
 const http = require('http');
+const { StartupLogger } = require('./utils');
 
-// Configuration
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
 const CONFIG = {
     discord: {
         token: process.env.DISCORD_BOT_TOKEN,
@@ -21,13 +29,16 @@ const CONFIG = {
     }
 };
 
+// ============================================================================
+// MAIN BOT CLASS
+// ============================================================================
+
 class MinecraftDiscordBot {
     constructor() {
         this.discordClient = new Client({
             intents: [
                 GatewayIntentBits.Guilds,
-                GatewayIntentBits.GuildMessages,
-                GatewayIntentBits.GuildMessageReactions
+                GatewayIntentBits.GuildMessages
             ]
         });
         this.minecraftBot = null;
@@ -42,7 +53,7 @@ class MinecraftDiscordBot {
         this.authMessageSent = false;
         this.authCheckTimeout = null;
         this.lastAuthUser = null;
-        this.authMessage = null;
+        this.authInteraction = null;
         this.originalStderrWrite = null;
         this.authCheckInterval = null;
 
@@ -62,17 +73,14 @@ class MinecraftDiscordBot {
         this.lastScoreboard = null;
         this.scoreboardUpdateInterval = null;
 
-        // Enhanced Safety features
+        // Safety features
         this.safetyConfig = {
             enabled: true, // toggle safety monitoring
             proximityRadius: 50, // blocks
             minHealth: 10, // health points (out of 20)
             alertCooldown: 30000, // 30 seconds between alerts
             autoDisconnectOnThreat: true, // auto-disconnect when threatened
-            autoDisconnectHealth: 6, // disconnect below this health
-            blockBreakRadius: 10, // monitor block breaks within this radius
-            trackInventory: false, // monitor inventory changes (DISABLED)
-            logAllEvents: true // detailed event logging
+            autoDisconnectHealth: 6 // disconnect below this health
         };
         this.nearbyPlayers = new Map();
         this.lastHealthAlert = 0;
@@ -83,26 +91,28 @@ class MinecraftDiscordBot {
         // Whitelist/Blacklist system
         this.trustedPlayers = new Set(process.env.TRUSTED_PLAYERS?.split(',') || []);
         this.blockedPlayers = new Set(process.env.BLOCKED_PLAYERS?.split(',') || []);
-        
-        // Enhanced monitoring
-        this.lastInventory = null;
-        this.blockBreakLog = [];
-        this.playerActivityLog = [];
 
         this.setupDiscordEvents();
         this.setupSlashCommands();
     }
 
-    async start() {
-        try {
-            // Start Discord bot first
-            await this.discordClient.login(CONFIG.discord.token);
-            console.log('✅ Discord bot connected successfully!');
+    // ========================================================================
+    // STARTUP & INITIALIZATION
+    // ========================================================================
 
-            // Set initial Discord activity
+    async start() {
+        const services = [];
+        
+        try {
+            await this.discordClient.login(CONFIG.discord.token);
+            services.push({ 
+                name: 'Discord Bot', 
+                status: true, 
+                details: this.discordClient.user?.tag 
+            });
+
             this.updateDiscordActivity('🔴 Offline', require('discord.js').ActivityType.Watching);
 
-            // Start periodic status updates every 30 seconds
             this.statusUpdateInterval = setInterval(() => {
                 if (this.isConnected && this.minecraftBot) {
                     this.updatePositionInfo();
@@ -111,40 +121,65 @@ class MinecraftDiscordBot {
                 }
             }, 30000);
 
-            // Start web server after Discord bot is ready
-            await this.startWebServer();
-
         } catch (error) {
-            console.error('Failed to start services:', error);
+            services.push({ 
+                name: 'Discord Bot', 
+                status: false, 
+                details: error.message 
+            });
+        }
+
+        try {
+            await this.startWebServer();
+            services.push({ 
+                name: 'Web Server', 
+                status: true, 
+                details: `http://${CONFIG.webServer.host}:${CONFIG.webServer.port}` 
+            });
+        } catch (error) {
+            services.push({ 
+                name: 'Web Server', 
+                status: false, 
+                details: error.message 
+            });
+        }
+
+        services.push({ 
+            name: 'Minecraft Bot', 
+            status: true, 
+            details: 'Ready (awaiting connection)' 
+        });
+
+        StartupLogger.showStatus(services);
+
+        const allOnline = services.every(s => s.status);
+        if (!allOnline) {
+            throw new Error('Some services failed to start');
         }
     }
 
     async startWebServer() {
         this.app = express();
         
-        // Middleware
         this.app.use(express.json());
-        this.app.use(express.static('public')); // Serve static files if you have any
-
-        // Routes
+        this.app.use(express.static('public'));
         this.setupWebRoutes();
-
-        // Create HTTP server
         this.server = http.createServer(this.app);
 
-        // Start listening
         return new Promise((resolve, reject) => {
             this.server.listen(CONFIG.webServer.port, CONFIG.webServer.host, (error) => {
                 if (error) {
-                    console.error('Failed to start web server:', error);
                     reject(error);
                 } else {
-                    console.log(`Web server running on http://${CONFIG.webServer.host}:${CONFIG.webServer.port}`);
                     resolve();
                 }
             });
         });
     }
+
+    // ========================================================================
+    // WEB SERVER ROUTES
+    // ========================================================================
 
     setupWebRoutes() {
         // Health check endpoint
@@ -273,58 +308,60 @@ class MinecraftDiscordBot {
         });
     }
 
+    // ========================================================================
+    // DISCORD EVENT HANDLERS
+    // ========================================================================
+
     setupDiscordEvents() {
-        this.discordClient.once('ready', async () => {
-            console.log(`Logged in as ${this.discordClient.user.tag}`);
+        this.discordClient.once('clientReady', async () => {
             await this.registerSlashCommands();
             await this.setupControlMessage();
         });
 
-        this.discordClient.on('messageReactionAdd', async (reaction, user) => {
-            if (user.bot) return;
-            if (reaction.message.id !== this.controlMessage?.id) return;
+        this.discordClient.on('interactionCreate', async (interaction) => {
+            if (!interaction.isButton()) return;
+            if (interaction.message.id !== this.controlMessage?.id) return;
 
-            if (reaction.emoji.name === '✅') {
+            if (interaction.customId === 'connect') {
                 this.shouldJoin = true;
-                this.lastAuthUser = user;
+                this.lastAuthUser = interaction.user;
+                this.authInteraction = interaction;
                 this.reconnectAttempts = 0;
 
                 const authEmbed = new EmbedBuilder()
                     .setTitle('🔐 Microsoft Authentication Required')
-                    .setDescription(`${user}, please authenticate to connect the Minecraft bot.`)
+                    .setDescription('Please authenticate to connect the Minecraft bot.')
                     .addFields(
-                        { name: '🔗 Authentication Link', value: '[Click here to authenticate](https://www.microsoft.com/link) (code will be provided)', inline: false },
-                        { name: '⏳ Status', value: 'Waiting for authentication code...', inline: false }
+                        { name: '⏳ Status', value: 'Connecting to Minecraft server...', inline: false }
                     )
                     .setColor('#ff9900')
                     .setTimestamp();
 
-                this.authMessage = await reaction.message.channel.send({ embeds: [authEmbed] });
-                console.log('🔐 Authentication message sent to Discord channel');
+                await interaction.reply({ 
+                    embeds: [authEmbed], 
+                    flags: [MessageFlags.Ephemeral]
+                });
 
                 this.updateDiscordActivity('⏳ Starting connection...', require('discord.js').ActivityType.Watching);
 
-                setTimeout(() => {
-                    if (this.authMessage && !this.isConnected) {
-                        console.log('🔍 Checking for authentication completion...');
-                        this.forceCheckAuthCode();
-                    }
-                }, 3000);
-
                 await this.connectToMinecraft();
 
-            } else if (reaction.emoji.name === '❌') {
+            } else if (interaction.customId === 'disconnect') {
                 this.shouldJoin = false;
                 this.reconnectAttempts = 0;
+                this.authInteraction = null;
                 if (this.minecraftBot) {
                     this.minecraftBot.quit();
                     this.minecraftBot = null;
                 }
                 this.updateDiscordActivity('🔴 Standby', require('discord.js').ActivityType.Watching);
                 await this.updateEmbed();
+                
+                await interaction.reply({ 
+                    content: '✅ Bot disconnected from Minecraft server!', 
+                    flags: [MessageFlags.Ephemeral]
+                });
             }
-
-            await reaction.users.remove(user.id);
         });
 
         // Handle slash commands
@@ -335,7 +372,7 @@ class MinecraftDiscordBot {
             if (interaction.channelId !== CONFIG.discord.channelId) {
                 await interaction.reply({ 
                     content: '❌ This bot can only be used in the designated channel!', 
-                    ephemeral: true 
+                    flags: [MessageFlags.Ephemeral]
                 });
                 return;
             }
@@ -347,9 +384,9 @@ class MinecraftDiscordBot {
                 const errorMessage = 'There was an error while executing this command!';
                 
                 if (interaction.replied || interaction.deferred) {
-                    await interaction.followUp({ content: errorMessage, ephemeral: true });
+                    await interaction.followUp({ content: errorMessage, flags: [MessageFlags.Ephemeral] });
                 } else {
-                    await interaction.reply({ content: errorMessage, ephemeral: true });
+                    await interaction.reply({ content: errorMessage, flags: [MessageFlags.Ephemeral] });
                 }
             }
         });
@@ -363,10 +400,25 @@ class MinecraftDiscordBot {
         }
 
         const embed = this.createEmbed();
-        this.controlMessage = await channel.send({ embeds: [embed] });
+        
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('connect')
+                    .setLabel('Connect')
+                    .setEmoji('✅')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId('disconnect')
+                    .setLabel('Disconnect')
+                    .setEmoji('❌')
+                    .setStyle(ButtonStyle.Danger)
+            );
 
-        await this.controlMessage.react('✅');
-        await this.controlMessage.react('❌');
+        this.controlMessage = await channel.send({ 
+            embeds: [embed],
+            components: [row]
+        });
     }
 
     createEmbed() {
@@ -398,7 +450,7 @@ class MinecraftDiscordBot {
         }
 
         embed.setTimestamp()
-            .setFooter({ text: '✅ Connect | ❌ Disconnect' });
+            .setFooter({ text: 'Use buttons below to control the bot' });
 
         if (this.authUrl && this.userCode) {
             embed.addFields({
@@ -464,7 +516,6 @@ class MinecraftDiscordBot {
             }
 
             this.discordClient.user.setActivity(status, { type: activityType });
-            console.log(`Discord activity updated: ${status}`);
         } catch (error) {
             console.error('Failed to update Discord activity:', error);
         }
@@ -499,9 +550,7 @@ class MinecraftDiscordBot {
                 embeds: [embed] 
             });
             
-            console.log(`Safety alert sent to ${this.lastAuthUser.tag}: ${title}`);
         } catch (error) {
-            console.error('Failed to send safety alert DM:', error);
             // Fallback to channel if DM fails
             try {
                 const channel = await this.discordClient.channels.fetch(CONFIG.discord.channelId);
@@ -511,7 +560,7 @@ class MinecraftDiscordBot {
                     });
                 }
             } catch (fallbackError) {
-                console.error('Failed to send fallback safety alert:', fallbackError);
+                // Silent error
             }
         }
     }
@@ -526,6 +575,9 @@ class MinecraftDiscordBot {
         const nearbyPlayers = [];
         const threats = [];
 
+        // Check if bot is in spawn area (X and Z between -100 and 100)
+        const isInSpawnArea = Math.abs(myPos.x) <= 100 && Math.abs(myPos.z) <= 100;
+
         for (const [username, player] of Object.entries(this.minecraftBot.players)) {
             if (!this.minecraftBot || username === this.minecraftBot.username) continue;
             if (!player.entity || !player.entity.position) continue;
@@ -539,16 +591,6 @@ class MinecraftDiscordBot {
                 if (!this.trustedPlayers.has(username) && distance <= 20) {
                     threats.push(playerInfo);
                 }
-                
-                // Log activity
-                if (this.safetyConfig.logAllEvents) {
-                    this.playerActivityLog.push({
-                        timestamp: new Date().toISOString(),
-                        player: username,
-                        distance: Math.round(distance),
-                        action: 'proximity'
-                    });
-                }
             }
         }
 
@@ -560,7 +602,18 @@ class MinecraftDiscordBot {
                 return `${isTrusted}${isBlocked} **${p.username}** (${p.distance}m)`;
             }).join(', ');
             
-            // Auto-disconnect if threatened by blocked/unknown players
+            // If in spawn area, send restart alert instead of disconnecting
+            if (isInSpawnArea && threats.length > 0) {
+                this.sendSafetyAlert(
+                    '🔄 Server Restart Detected',
+                    `**Player(s) detected at spawn (likely server restart):**\n${playerList}\n\n**Location:** Spawn area (X: ${Math.round(myPos.x)}, Z: ${Math.round(myPos.z)})\n**Action:** No disconnect (spawn area protection active)`,
+                    '#00bfff',
+                    false
+                );
+                return;
+            }
+            
+            // Auto-disconnect if threatened by unknown players (outside spawn)
             if (this.safetyConfig.autoDisconnectOnThreat && threats.length > 0) {
                 const threatList = threats.map(p => `${p.username} (${p.distance}m)`).join(', ');
                 this.sendSafetyAlert(
@@ -637,107 +690,27 @@ class MinecraftDiscordBot {
         }
     }
 
-    // Monitor block breaks near the bot
-    monitorBlockBreak(oldBlock, newBlock) {
-        if (!this.safetyConfig.enabled || !this.minecraftBot) return;
-        
-        const botPos = this.minecraftBot.entity.position;
-        const blockPos = oldBlock.position;
-        const distance = botPos.distanceTo(blockPos);
-        
-        if (distance <= this.safetyConfig.blockBreakRadius) {
-            const blockInfo = {
-                timestamp: new Date().toISOString(),
-                block: oldBlock.name,
-                position: { x: blockPos.x, y: blockPos.y, z: blockPos.z },
-                distance: Math.round(distance)
-            };
-            
-            this.blockBreakLog.push(blockInfo);
-            
-            // Keep only last 50 entries
-            if (this.blockBreakLog.length > 50) {
-                this.blockBreakLog.shift();
-            }
-            
-            // Alert on block breaks within 5 blocks
-            if (distance <= 5) {
-                this.sendSafetyAlert(
-                    '🔨 Block Break Alert',
-                    `**A block was broken very close to you!**\nBlock: \`${oldBlock.name}\`\nDistance: ${Math.round(distance)} blocks\nPosition: \`${blockPos.x}, ${blockPos.y}, ${blockPos.z}\``,
-                    '#ff6600',
-                    true
-                );
-            }
-        }
-    }
-
-    // Monitor inventory changes
-    checkInventoryChanges() {
-        if (!this.safetyConfig.trackInventory || !this.minecraftBot) return;
-        
-        const currentInventory = this.minecraftBot.inventory.slots.filter(slot => slot !== null).map(slot => ({
-            name: slot.name,
-            count: slot.count,
-            slot: slot.slot
-        }));
-        
-        if (this.lastInventory) {
-            // Check for missing items
-            const currentItems = new Map(currentInventory.map(item => [`${item.slot}`, item]));
-            const lastItems = new Map(this.lastInventory.map(item => [`${item.slot}`, item]));
-            
-            // Detect stolen/lost items
-            for (const [slot, item] of lastItems) {
-                const current = currentItems.get(slot);
-                if (!current) {
-                    this.sendSafetyAlert(
-                        '🎒 Inventory Alert',
-                        `**Item removed from inventory!**\nItem: \`${item.name}\` (x${item.count})\nSlot: ${item.slot}`,
-                        '#ff3300',
-                        true
-                    );
-                } else if (current.count < item.count) {
-                    const lost = item.count - current.count;
-                    this.sendSafetyAlert(
-                        '🎒 Inventory Alert',
-                        `**Items taken from inventory!**\nItem: \`${item.name}\`\nLost: ${lost}\nRemaining: ${current.count}`,
-                        '#ff3300',
-                        true
-                    );
-                }
-            }
-        }
-        
-        this.lastInventory = currentInventory;
-    }
-
     async attemptReconnect() {
         if (!this.shouldJoin) {
-            console.log('[RECONNECT] Reconnection cancelled - shouldJoin is false');
             return;
         }
 
         if (this.isConnecting) {
-            console.log('[RECONNECT] Connection already in progress, skipping');
             return;
         }
 
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.log('[RECONNECT] Max reconnection attempts reached');
             this.shouldJoin = false;
             await this.updateEmbed();
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[RECONNECT] Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
 
         await this.updateEmbed();
 
-        // Add longer delay between reconnect attempts with a max cap
-        const delay = Math.min(this.reconnectDelay * this.reconnectAttempts, 60000); // Cap at 60 seconds
-        console.log(`[RECONNECT] Waiting ${delay}ms before next attempt`);
+        // Add longer delay between reconnect attempts to avoid "already online" issues
+        const delay = this.reconnectDelay * this.reconnectAttempts; // Exponential backoff
 
         setTimeout(async () => {
             if (this.shouldJoin && !this.isConnected && !this.isConnecting) {
@@ -748,73 +721,35 @@ class MinecraftDiscordBot {
 
     async connectToMinecraft() {
         if (this.isConnecting) {
-            console.log('🎮 Connection already in progress, skipping...');
             return;
         }
 
         if (this.minecraftBot) {
             this.minecraftBot.quit();
-            this.minecraftBot = null;
         }
 
         try {
             this.isConnecting = true;
-            console.log('🎮 Connecting to Minecraft server...');
             await this.updateEmbed();
 
             this.setupConsoleCapture();
-
-            if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
-                console.log('Production environment detected - attempting to handle auth differently');
-                if (process.env.MC_ACCESS_TOKEN && process.env.MC_REFRESH_TOKEN) {
-                    console.log('Using stored authentication tokens for production');
-                } else {
-                    console.log('No stored authentication tokens found. Bot will need manual authentication.');
-                    console.log('Available env vars:', Object.keys(process.env).filter(key => key.startsWith('MC_') || key.includes('TOKEN')));
-                }
-            }
 
             this.minecraftBot = mineflayer.createBot({
                 host: CONFIG.minecraft.host,
                 port: CONFIG.minecraft.port,
                 version: CONFIG.minecraft.version,
-                auth: CONFIG.minecraft.auth,
-                checkTimeoutInterval: 120000,
-                keepAlive: true,
-                hideErrors: false,
-                skipValidation: true,
-                connectTimeout: 30000
-            });
-
-            // Handle early connection failures
-            this.minecraftBot.once('error', (error) => {
-                console.error('❌ Early connection error:', error.message);
-                if (!this.isConnected) {
-                    this.isConnecting = false;
-                    this.isConnected = false;
-                }
+                auth: CONFIG.minecraft.auth
             });
 
             this.setupMinecraftEvents();
 
             this.authCheckTimeout = setTimeout(() => {
-                if (!this.isConnected && !this.isConnecting) {
-                    console.log('[AUTH] Connection timed out after 90 seconds');
-                    this.isConnecting = false;
-                    if (this.minecraftBot) {
-                        this.minecraftBot.quit();
-                        this.minecraftBot = null;
-                    }
-                }
-            }, 90000);
+                // Silent auth check
+            }, 5000);
 
         } catch (error) {
-            console.error('Failed to connect to Minecraft:', error);
             this.isConnecting = false;
-            this.isConnected = false;
-            this.minecraftBot = null;
             if (this.shouldJoin) {
-                console.log('[RECONNECT] Connection failed, attempting reconnect...');
                 await this.attemptReconnect();
             } else {
                 await this.updateEmbed();
@@ -823,16 +758,14 @@ class MinecraftDiscordBot {
     }
 
     setupConsoleCapture() {
-        // Enhanced console capture for auth detection
+        // Simplified console capture for auth detection only
         if (!this.originalStderrWrite) {
             this.originalStderrWrite = process.stderr.write;
             process.stderr.write = (chunk, encoding, callback) => {
                 const message = chunk.toString();
 
-                // Capture any line that might contain auth info
-                if (message.includes('microsoft.com') || message.includes('code') || message.includes('link')) {
-                    // Use original write to avoid recursion
-                    this.originalStderrWrite.call(process.stderr, `[AUTH CAPTURE]: ${message}`, encoding);
+                // Only capture auth messages, suppress debug spam
+                if (message.includes('microsoft.com/link') && message.includes('use the code')) {
                     this.extractAuthDetails(message);
                 } else if (message.includes('Chunk size') || message.includes('partial packet')) {
                     // Suppress these debug messages completely
@@ -848,10 +781,8 @@ class MinecraftDiscordBot {
             process.stdout.write = (chunk, encoding, callback) => {
                 const message = chunk.toString();
 
-                // Capture any line that might contain auth info
-                if (message.includes('microsoft.com') || message.includes('code') || message.includes('link')) {
-                    // Use original write to avoid recursion
-                    this.originalStdoutWrite.call(process.stdout, `[AUTH CAPTURE]: ${message}`, encoding);
+                // Only capture auth messages, suppress debug spam
+                if (message.includes('microsoft.com/link') && message.includes('use the code')) {
                     this.extractAuthDetails(message);
                 } else if (message.includes('Chunk size') || message.includes('partial packet')) {
                     // Suppress these debug messages completely
@@ -864,23 +795,39 @@ class MinecraftDiscordBot {
     }
 
     async forceCheckAuthCode() {
-        if (this.isConnected || !this.authMessage) return;
-        console.log('[AUTH] Force checking authentication status...');
-        
-        // Wait a bit for auth to complete
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        return;
     }
 
     setupMinecraftEvents() {
         this.minecraftBot.on('login', async () => {
-            console.log('✅ Successfully logged in to Minecraft server!');
-            console.log('[LOGIN] Waiting for spawn event...');
-            
-            // Don't mark as fully connected yet - wait for spawn
-            this.isConnecting = true; // Keep this true until spawn
+            this.isConnected = true;
+            this.isConnecting = false;
             this.authUrl = null;
             this.userCode = null;
             this.authMessageSent = false;
+            this.reconnectAttempts = 0;
+
+            if (this.authInteraction) {
+                try {
+                    const successEmbed = new EmbedBuilder()
+                        .setTitle('✅ Authentication Successful')
+                        .setDescription(`Connected to Minecraft server as **${this.minecraftBot.username}**!`)
+                        .setColor('#00ff00')
+                        .setTimestamp();
+
+                    await this.authInteraction.editReply({ 
+                        embeds: [successEmbed]
+                    });
+                    
+                    this.authInteraction = null;
+                } catch (error) {
+                    // Silent error
+                }
+            }
+
+            if (this.minecraftBot && this.minecraftBot.game && this.minecraftBot.game.dimension) {
+                this.currentWorld = this.minecraftBot.game.dimension;
+            }
 
             if (this.authCheckTimeout) {
                 clearTimeout(this.authCheckTimeout);
@@ -893,22 +840,17 @@ class MinecraftDiscordBot {
             if (this.authMessage) {
                 try {
                     await this.authMessage.delete();
-                    console.log('🗑️  Authentication message cleaned up');
                     this.authMessage = null;
                 } catch (error) {
-                    console.error('⚠️  Failed to clean up auth message:', error);
+                    // Silent error
                 }
             }
+
+            this.updateDiscordActivity();
+            await this.updateEmbed();
         });
 
         this.minecraftBot.on('spawn', async () => {
-            console.log('🌍 Bot spawned in Minecraft world');
-            
-            // Mark as connected only after spawn
-            this.isConnected = true;
-            this.isConnecting = false;
-            this.reconnectAttempts = 0;
-
             this.updatePositionInfo();
 
             if (this.minecraftBot && this.minecraftBot.game && this.minecraftBot.game.dimension) {
@@ -920,18 +862,12 @@ class MinecraftDiscordBot {
             this.lastHealth = this.currentHealth;
 
             this.updateDiscordActivity();
-            
-            console.log('✅ Fully connected to Minecraft server!');
 
-            // Optional: Auto-teleport on spawn (configurable)
-            if (process.env.AUTO_TELEPORT_USER) {
-                setTimeout(() => {
-                    if (this.minecraftBot) {
-                        this.minecraftBot.chat(`/tpa ${process.env.AUTO_TELEPORT_USER}`);
-                        console.log(`📞 Sent teleport request to ${process.env.AUTO_TELEPORT_USER}`);
-                    }
-                }, 5000);
-            }
+            setTimeout(() => {
+                if (this.minecraftBot) {
+                    this.minecraftBot.chat('/tpa doggomc');
+                }
+            }, 5000);
 
             await this.updateEmbed();
         });
@@ -945,17 +881,11 @@ class MinecraftDiscordBot {
         this.minecraftBot.on('respawn', () => {
             if (this.minecraftBot && this.minecraftBot.game && this.minecraftBot.game.dimension) {
                 this.currentWorld = this.minecraftBot.game.dimension;
-                console.log('Bot respawned/changed dimension to:', this.currentWorld);
                 this.updateEmbed();
             }
         });
 
         this.minecraftBot.on('end', async (reason) => {
-            console.log('🔌 Minecraft connection ended:', reason);
-            
-            // If we just authenticated and haven't spawned yet, don't reconnect
-            const wasAuthenticating = this.authUrl !== null || this.userCode !== null;
-            
             this.isConnected = false;
             this.isConnecting = false;
             this.minecraftBot = null;
@@ -965,22 +895,12 @@ class MinecraftDiscordBot {
             this.updateDiscordActivity();
             await this.updateEmbed();
 
-            // Don't reconnect if we're still in the authentication phase
-            if (this.shouldJoin && !wasAuthenticating) {
-                console.log('[RECONNECT] Connection ended, attempting reconnect...');
+            if (this.shouldJoin) {
                 await this.attemptReconnect();
-            } else if (wasAuthenticating) {
-                console.log('[AUTH] Connection ended during authentication, waiting before retry...');
-                setTimeout(() => {
-                    if (this.shouldJoin && !this.isConnected) {
-                        this.attemptReconnect();
-                    }
-                }, 5000);
             }
         });
 
         this.minecraftBot.on('error', async (error) => {
-            console.error('❌ Minecraft bot error:', error);
             this.isConnected = false;
             this.isConnecting = false;
             this.currentWorld = 'Unknown';
@@ -989,13 +909,11 @@ class MinecraftDiscordBot {
             await this.updateEmbed();
 
             if (this.shouldJoin) {
-                console.log('[RECONNECT] Error occurred, attempting reconnect...');
                 await this.attemptReconnect();
             }
         });
 
         this.minecraftBot.on('kicked', async (reason) => {
-            console.log('⚠️  Bot was kicked from server:', reason);
             this.isConnected = false;
             this.isConnecting = false;
             this.minecraftBot = null;
@@ -1005,17 +923,10 @@ class MinecraftDiscordBot {
             await this.updateEmbed();
 
             if (this.shouldJoin) {
-                console.log('[RECONNECT] Bot kicked, attempting reconnect...');
                 await this.attemptReconnect();
             }
         });
 
-        this.minecraftBot.on('auth_pending', (data) => {
-            console.log('Microsoft auth pending:', data);
-            this.authUrl = data.verification_uri;
-            this.userCode = data.user_code;
-            this.updateEmbed();
-        });
 
         // Health monitoring events
         this.minecraftBot.on('health', () => {
@@ -1024,19 +935,16 @@ class MinecraftDiscordBot {
 
         // Player monitoring events
         this.minecraftBot.on('playerJoined', (player) => {
-            console.log(`Player ${player.username} joined - checking proximity`);
             setTimeout(() => this.checkPlayerProximity(), 1000);
         });
 
         this.minecraftBot.on('playerLeft', (player) => {
-            console.log(`Player ${player.username} left`);
             this.nearbyPlayers.delete(player.username);
         });
 
         // Entity movement monitoring for other players
         this.minecraftBot.on('entityMoved', (entity) => {
             // Check if it's another player entity
-            if (!this.minecraftBot) return;
             if (entity && entity.type === 'player' && entity.username !== this.minecraftBot.username) {
                 this.checkPlayerProximity();
             }
@@ -1052,54 +960,38 @@ class MinecraftDiscordBot {
     }
 
     async extractAuthDetails(message) {
-        // Try multiple patterns to extract the auth code
-        const codePatterns = [
-            /code ([A-Z0-9]+)/i,
-            /use the code ([A-Z0-9]+)/i,
-            /enter code: ([A-Z0-9]+)/i,
-            /code: ([A-Z0-9]+)/i
-        ];
-        
-        let authCode = null;
-        for (const pattern of codePatterns) {
-            const match = message.match(pattern);
-            if (match) {
-                authCode = match[1];
-                break;
-            }
-        }
+        const urlMatch = message.match(/https:\/\/[^\s]+/);
+        const codeMatch = message.match(/code ([A-Z0-9]+)/);
 
-        if (authCode && this.lastAuthUser && this.authMessage) {
-            // Use original write to avoid recursion
-            this.originalStdoutWrite.call(process.stdout, `[AUTH] Found auth code: ${authCode} updating message\n`);
+        if (codeMatch && urlMatch && this.authInteraction) {
+            const authCode = codeMatch[1];
+            const baseUrl = urlMatch[0];
+            
+            // Include the OTP in the URL
+            const authUrlWithOtp = baseUrl.includes('?') 
+                ? `${baseUrl}&otc=${authCode}` 
+                : `${baseUrl}?otc=${authCode}`;
+            
+            this.authUrl = authUrlWithOtp;
+            this.userCode = authCode;
 
             const updatedEmbed = new EmbedBuilder()
                 .setTitle('🔐 Microsoft Authentication Required')
-                .setDescription(`${this.lastAuthUser}, please authenticate to connect the Minecraft bot.`)
+                .setDescription('Please authenticate to connect the Minecraft bot.')
                 .addFields(
-                    { name: '🔗 Authentication Link', value: `[Click here to authenticate](https://microsoft.com/link?otc=${authCode})`, inline: false },
-                    { name: '🔑 Authentication Code', value: `**${authCode}** (pre-filled in link)`, inline: false },
-                    { name: '📝 Instructions', value: '1. Click the link above (code is pre-filled)\n2. Complete authentication\n3. Wait for bot to connect', inline: false }
+                    { name: '🔗 Authentication Link', value: `[Click here to authenticate](${authUrlWithOtp})`, inline: false },
+                    { name: '🔑 Code (if needed)', value: `\`${authCode}\``, inline: false },
+                    { name: '⏳ Status', value: 'Waiting for you to complete authentication...', inline: false }
                 )
-                .setColor('#00ff00')
+                .setColor('#ff9900')
                 .setTimestamp();
 
             try {
-                await this.authMessage.edit({ embeds: [updatedEmbed] });
-                this.originalStdoutWrite.call(process.stdout, `[AUTH] Successfully updated auth message with code: ${authCode}\n`);
+                await this.authInteraction.editReply({ embeds: [updatedEmbed] });
+                await this.updateEmbed();
             } catch (error) {
-                this.originalStderrWrite.call(process.stderr, `[AUTH] Failed to update auth message: ${error}\n`);
-                try {
-                    const channel = await this.discordClient.channels.fetch(CONFIG.discord.channelId);
-                    await channel.send({
-                        content: `${this.lastAuthUser} - Authentication code: **${authCode}**\nUse: https://www.microsoft.com/link`
-                    });
-                } catch (channelError) {
-                    this.originalStderrWrite.call(process.stderr, `[AUTH] Failed to send new message too: ${channelError}\n`);
-                }
+                console.error('Failed to update auth message:', error);
             }
-        } else if (authCode) {
-            this.originalStdoutWrite.call(process.stdout, `[AUTH] Found code but missing Discord context: hasUser=${!!this.lastAuthUser}, hasAuthMessage=${!!this.authMessage}\n`);
         }
     }
 
@@ -1108,7 +1000,25 @@ class MinecraftDiscordBot {
 
         try {
             const embed = this.createEmbed();
-            await this.controlMessage.edit({ embeds: [embed] });
+            
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('connect')
+                        .setLabel('Connect')
+                        .setEmoji('✅')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId('disconnect')
+                        .setLabel('Disconnect')
+                        .setEmoji('❌')
+                        .setStyle(ButtonStyle.Danger)
+                );
+
+            await this.controlMessage.edit({ 
+                embeds: [embed],
+                components: [row]
+            });
         } catch (error) {
             console.error('Failed to update embed:', error);
         }
@@ -1136,48 +1046,22 @@ class MinecraftDiscordBot {
                 .setDescription('Connect the bot to the Minecraft server'),
             new SlashCommandBuilder()
                 .setName('disconnect')
-                .setDescription('Disconnect the bot from the Minecraft server'),
-            new SlashCommandBuilder()
-                .setName('security')
-                .setDescription('View security status and recent alerts'),
-            new SlashCommandBuilder()
-                .setName('trust')
-                .setDescription('Add a player to trusted list')
-                .addStringOption(option =>
-                    option.setName('player')
-                        .setDescription('Player username to trust')
-                        .setRequired(true)
-                ),
-            new SlashCommandBuilder()
-                .setName('untrust')
-                .setDescription('Remove a player from trusted list')
-                .addStringOption(option =>
-                    option.setName('player')
-                        .setDescription('Player username to untrust')
-                        .setRequired(true)
-                ),
-            new SlashCommandBuilder()
-                .setName('logs')
-                .setDescription('View security logs (block breaks and player activity)'),
-            new SlashCommandBuilder()
-                .setName('clearauth')
-                .setDescription('Clear cached Minecraft authentication (forces fresh login)')
+                .setDescription('Disconnect the bot from the Minecraft server')
         ];
     }
 
-    // Register slash commands with Discord
+    // ========================================================================
+    // SLASH COMMAND REGISTRATION
+    // ========================================================================
+
     async registerSlashCommands() {
         try {
             const rest = new REST({ version: '10' }).setToken(CONFIG.discord.token);
-
-            console.log('🔄 Registering Discord slash commands...');
 
             await rest.put(
                 Routes.applicationCommands(this.discordClient.user.id),
                 { body: this.commands.map(command => command.toJSON()) }
             );
-
-            console.log('✅ Discord slash commands registered successfully!');
         } catch (error) {
             console.error('Error registering slash commands:', error);
         }
@@ -1203,23 +1087,8 @@ class MinecraftDiscordBot {
             case 'disconnect':
                 await this.handleDisconnectCommand(interaction);
                 break;
-            case 'security':
-                await this.handleSecurityCommand(interaction);
-                break;
-            case 'trust':
-                await this.handleTrustCommand(interaction);
-                break;
-            case 'untrust':
-                await this.handleUntrustCommand(interaction);
-                break;
-            case 'logs':
-                await this.handleLogsCommand(interaction);
-                break;
-            case 'clearauth':
-                await this.handleClearAuthCommand(interaction);
-                break;
             default:
-                await interaction.reply({ content: 'Unknown command!', ephemeral: true });
+                await interaction.reply({ content: 'Unknown command!', flags: [MessageFlags.Ephemeral] });
         }
     }
 
@@ -1230,7 +1099,7 @@ class MinecraftDiscordBot {
         if (!this.isConnected || !this.minecraftBot) {
             await interaction.reply({ 
                 content: '❌ Bot is not connected to the Minecraft server!', 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
             return;
         }
@@ -1239,14 +1108,12 @@ class MinecraftDiscordBot {
             this.minecraftBot.chat(message);
             await interaction.reply({ 
                 content: `✅ Message sent: "${message}"`, 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
-            console.log(`Message sent to Minecraft: ${message}`);
         } catch (error) {
-            console.error('Error sending message to Minecraft:', error);
             await interaction.reply({ 
                 content: '❌ Failed to send message to Minecraft server!', 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
         }
     }
@@ -1256,7 +1123,7 @@ class MinecraftDiscordBot {
         if (!this.isConnected || !this.minecraftBot) {
             await interaction.reply({ 
                 content: '❌ Bot is not connected to the Minecraft server!', 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
             return;
         }
@@ -1280,7 +1147,6 @@ class MinecraftDiscordBot {
 
             // Send the /shards command
             this.minecraftBot.chat('/shards');
-            console.log('💎 Requested shards information from server');
 
             // Remove listener after 10 seconds if no response
             setTimeout(() => {
@@ -1293,7 +1159,6 @@ class MinecraftDiscordBot {
             }, 10000);
 
         } catch (error) {
-            console.error('💎 Error requesting shards:', error);
             await interaction.editReply({ 
                 content: '❌ Failed to request shards information!' 
             });
@@ -1328,7 +1193,7 @@ class MinecraftDiscordBot {
         if (this.isConnected) {
             await interaction.reply({ 
                 content: '✅ Bot is already connected to the Minecraft server!', 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
             return;
         }
@@ -1339,7 +1204,7 @@ class MinecraftDiscordBot {
         
         await interaction.reply({ 
             content: '🔄 Attempting to connect to the Minecraft server...', 
-            ephemeral: true 
+            flags: [MessageFlags.Ephemeral] 
         });
     }
 
@@ -1348,7 +1213,7 @@ class MinecraftDiscordBot {
         if (!this.isConnected) {
             await interaction.reply({ 
                 content: '❌ Bot is not connected to the Minecraft server!', 
-                ephemeral: true 
+                flags: [MessageFlags.Ephemeral] 
             });
             return;
         }
@@ -1364,196 +1229,13 @@ class MinecraftDiscordBot {
         await this.updateEmbed();
         await interaction.reply({ 
             content: '✅ Bot disconnected from the Minecraft server!', 
-            ephemeral: true 
+            flags: [MessageFlags.Ephemeral] 
         });
-    }
-
-    // Handle /security command
-    async handleSecurityCommand(interaction) {
-        const embed = new EmbedBuilder()
-            .setTitle('🛡️ Security System Status')
-            .setColor('#00ff00')
-            .addFields(
-                { name: '🔒 Security', value: this.safetyConfig.enabled ? '✅ Enabled' : '❌ Disabled', inline: true },
-                { name: '🚨 Auto-Disconnect', value: this.safetyConfig.autoDisconnectOnThreat ? '✅ Enabled' : '❌ Disabled', inline: true },
-                { name: '❤️ Health Threshold', value: `${this.safetyConfig.autoDisconnectHealth}/20`, inline: true },
-                { name: '📏 Proximity Radius', value: `${this.safetyConfig.proximityRadius} blocks`, inline: true },
-                { name: '🔨 Block Monitor Radius', value: `${this.safetyConfig.blockBreakRadius} blocks`, inline: true },
-                { name: '🎒 Inventory Tracking', value: this.safetyConfig.trackInventory ? '✅ Enabled' : '❌ Disabled', inline: true },
-                { name: '✅ Trusted Players', value: this.trustedPlayers.size > 0 ? Array.from(this.trustedPlayers).join(', ') : 'None', inline: false },
-                { name: '🚫 Blocked Players', value: this.blockedPlayers.size > 0 ? Array.from(this.blockedPlayers).join(', ') : 'None', inline: false }
-            )
-            .setTimestamp();
-        
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-    }
-
-    // Handle /trust command
-    async handleTrustCommand(interaction) {
-        const player = interaction.options.getString('player');
-        
-        if (this.trustedPlayers.has(player)) {
-            await interaction.reply({ 
-                content: `✅ **${player}** is already in the trusted list!`, 
-                ephemeral: true 
-            });
-            return;
-        }
-        
-        this.trustedPlayers.add(player);
-        this.blockedPlayers.delete(player); // Remove from blocked if present
-        
-        await interaction.reply({ 
-            content: `✅ Added **${player}** to trusted players list!`, 
-            ephemeral: true 
-        });
-        
-        console.log(`Trusted player added: ${player}`);
-    }
-
-    // Handle /untrust command
-    async handleUntrustCommand(interaction) {
-        const player = interaction.options.getString('player');
-        
-        if (!this.trustedPlayers.has(player)) {
-            await interaction.reply({ 
-                content: `⚠️ **${player}** is not in the trusted list!`, 
-                ephemeral: true 
-            });
-            return;
-        }
-        
-        this.trustedPlayers.delete(player);
-        
-        await interaction.reply({ 
-            content: `❌ Removed **${player}** from trusted players list!`, 
-            ephemeral: true 
-        });
-        
-        console.log(`Trusted player removed: ${player}`);
-    }
-
-    // Handle /logs command
-    async handleLogsCommand(interaction) {
-        await interaction.deferReply({ ephemeral: true });
-        
-        const embed = new EmbedBuilder()
-            .setTitle('📋 Security Logs')
-            .setColor('#3498db')
-            .setTimestamp();
-        
-        // Block break logs
-        if (this.blockBreakLog.length > 0) {
-            const recentBreaks = this.blockBreakLog.slice(-5).map(log => 
-                `\`${log.block}\` at (${log.position.x}, ${log.position.y}, ${log.position.z}) - ${log.distance}m away`
-            ).join('\n');
-            embed.addFields({ 
-                name: '🔨 Recent Block Breaks', 
-                value: recentBreaks || 'None', 
-                inline: false 
-            });
-        } else {
-            embed.addFields({ 
-                name: '🔨 Recent Block Breaks', 
-                value: 'No block breaks detected', 
-                inline: false 
-            });
-        }
-        
-        // Player activity logs
-        if (this.playerActivityLog.length > 0) {
-            const recentActivity = this.playerActivityLog.slice(-5).map(log => 
-                `**${log.player}** - ${log.distance}m away (${new Date(log.timestamp).toLocaleTimeString()})`
-            ).join('\n');
-            embed.addFields({ 
-                name: '👥 Recent Player Activity', 
-                value: recentActivity || 'None', 
-                inline: false 
-            });
-        } else {
-            embed.addFields({ 
-                name: '👥 Recent Player Activity', 
-                value: 'No player activity detected', 
-                inline: false 
-            });
-        }
-        
-        embed.addFields({ 
-            name: '📊 Total Logs', 
-            value: `Block Breaks: ${this.blockBreakLog.length} | Player Events: ${this.playerActivityLog.length}`, 
-            inline: false 
-        });
-        
-        await interaction.editReply({ embeds: [embed] });
-    }
-
-    // Handle /clearauth command
-    async handleClearAuthCommand(interaction) {
-        // Disconnect if currently connected
-        const wasConnected = this.isConnected;
-        
-        if (this.isConnected) {
-            this.shouldJoin = false;
-            this.reconnectAttempts = 0;
-            
-            if (this.minecraftBot) {
-                this.minecraftBot.quit();
-                this.minecraftBot = null;
-            }
-        }
-
-        // Clear auth state
-        this.authUrl = null;
-        this.userCode = null;
-        this.authMessageSent = false;
-        this.lastAuthUser = null;
-        
-        if (this.authMessage) {
-            try {
-                await this.authMessage.delete();
-                this.authMessage = null;
-            } catch (error) {
-                console.error('Failed to delete auth message:', error);
-            }
-        }
-
-        // Clear auth tokens from mineflayer cache
-        // The tokens are stored in the user's home directory by prismarine-auth
-        try {
-            const fs = require('fs');
-            const path = require('path');
-            const os = require('os');
-            
-            const authCachePath = path.join(os.homedir(), '.minecraft', 'nmp-cache');
-            
-            if (fs.existsSync(authCachePath)) {
-                fs.rmSync(authCachePath, { recursive: true, force: true });
-                console.log('✅ Cleared Minecraft authentication cache');
-            }
-        } catch (error) {
-            console.error('Error clearing auth cache:', error);
-        }
-
-        await this.updateEmbed();
-        
-        const embed = new EmbedBuilder()
-            .setTitle('🔐 Authentication Cleared')
-            .setDescription('Minecraft account authentication has been cleared successfully.')
-            .addFields(
-                { name: '📋 Status', value: wasConnected ? 'Bot was disconnected' : 'No active connection', inline: false },
-                { name: '🔄 Next Connection', value: 'Will require fresh Microsoft authentication', inline: false }
-            )
-            .setColor('#00ff00')
-            .setTimestamp();
-        
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-        console.log('🔐 Minecraft authentication cleared');
     }
 
     // Handle shards response from Minecraft
     async handleShardsResponse(interaction, messageText) {
         try {
-            console.log('💎 Received shards response:', messageText);
             
             // Parse the message to extract shard information
             let shardsInfo = 'Unknown';
@@ -1603,15 +1285,13 @@ class MinecraftDiscordBot {
                 setTimeout(async () => {
                     try {
                         await reply.delete();
-                        console.log('💎 Shards message auto-deleted after 10 seconds');
                     } catch (error) {
-                        console.error('⚠️ Failed to delete shards message:', error.message);
+                        // Silent error
                     }
                 }, 10000);
             }
             
         } catch (error) {
-            console.error('💎 Error processing shards response:', error);
             if (!interaction.replied) {
                 await interaction.editReply({
                     content: '❌ Error processing shards response!'
@@ -1622,8 +1302,6 @@ class MinecraftDiscordBot {
 
     // Graceful shutdown method
     async shutdown() {
-        console.log('Shutting down services...');
-
         // Clear intervals
         if (this.statusUpdateInterval) {
             clearInterval(this.statusUpdateInterval);
@@ -1646,7 +1324,6 @@ class MinecraftDiscordBot {
         if (this.server) {
             return new Promise((resolve) => {
                 this.server.close(() => {
-                    console.log('Web server closed');
                     resolve();
                 });
             });
@@ -1654,24 +1331,30 @@ class MinecraftDiscordBot {
     }
 }
 
-// Start the bot
+// ============================================================================
+// STARTUP SEQUENCE
+// ============================================================================
+
+StartupLogger.showBanner();
+
 const bot = new MinecraftDiscordBot();
-bot.start().then(() => {
-    console.log('All services started successfully!');
-}).catch((error) => {
-    console.error('Failed to start services:', error);
+bot.start().catch((error) => {
+    StartupLogger.error(`Startup failed: ${error.message}`);
     process.exit(1);
 });
 
-// Graceful shutdown
+// ============================================================================
+// ERROR HANDLING & PROCESS MANAGEMENT
+// ============================================================================
+
 const gracefulShutdown = async (signal) => {
-    console.log(`Received ${signal}, shutting down gracefully...`);
+    StartupLogger.warning(`Received ${signal}, shutting down gracefully...`);
     try {
         await bot.shutdown();
-        console.log('Shutdown complete');
+        StartupLogger.success('Shutdown complete');
         process.exit(0);
     } catch (error) {
-        console.error('Error during shutdown:', error);
+        StartupLogger.error(`Error during shutdown: ${error.message}`);
         process.exit(1);
     }
 };
@@ -1679,13 +1362,12 @@ const gracefulShutdown = async (signal) => {
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
-    console.error('Uncaught exception:', error);
-    gracefulShutdown('uncaughtException');
+    StartupLogger.error(`Uncaught exception: ${error.message}`);
+    console.error(error.stack);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled rejection at:', promise, 'reason:', reason);
-    gracefulShutdown('unhandledRejection');
+    StartupLogger.error(`Unhandled rejection: ${reason}`);
+    console.error('Promise:', promise);
 });
