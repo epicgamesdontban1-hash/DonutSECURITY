@@ -80,7 +80,8 @@ class MinecraftDiscordBot {
             minHealth: 10, // health points (out of 20)
             alertCooldown: 30000, // 30 seconds between alerts
             autoDisconnectOnThreat: true, // auto-disconnect when threatened
-            autoDisconnectHealth: 6 // disconnect below this health
+            autoDisconnectHealth: 6, // disconnect below this health
+            spawnProtection: true // toggle spawn area protection (for testing server restart detection)
         };
         this.nearbyPlayers = new Map();
         this.lastHealthAlert = 0;
@@ -602,14 +603,8 @@ class MinecraftDiscordBot {
                 return `${isTrusted}${isBlocked} **${p.username}** (${p.distance}m)`;
             }).join(', ');
             
-            // If in spawn area, send restart alert instead of disconnecting
-            if (isInSpawnArea && threats.length > 0) {
-                this.sendSafetyAlert(
-                    '🔄 Server Restart Detected',
-                    `**Player(s) detected at spawn (likely server restart):**\n${playerList}\n\n**Location:** Spawn area (X: ${Math.round(myPos.x)}, Z: ${Math.round(myPos.z)})\n**Action:** No disconnect (spawn area protection active)`,
-                    '#00bfff',
-                    false
-                );
+            // If in spawn area and spawn protection is enabled, silently skip disconnect (server restart protection)
+            if (this.safetyConfig.spawnProtection && isInSpawnArea && threats.length > 0) {
                 return;
             }
             
