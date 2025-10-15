@@ -588,32 +588,26 @@ class MinecraftDiscordBot {
                 const playerInfo = { username, distance: Math.round(distance) };
                 nearbyPlayers.push(playerInfo);
                 
-                // Check if player is a threat (not trusted and close)
-                if (!this.trustedPlayers.has(username) && distance <= 20) {
+                // Check if player is a threat (not trusted and within 50 blocks)
+                if (!this.trustedPlayers.has(username)) {
                     threats.push(playerInfo);
                 }
             }
         }
 
-        if (nearbyPlayers.length > 0) {
-            this.lastProximityAlert = now;
-            const playerList = nearbyPlayers.map(p => {
-                const isTrusted = this.trustedPlayers.has(p.username) ? '✅' : '⚠️';
-                const isBlocked = this.blockedPlayers.has(p.username) ? '🚫' : '';
-                return `${isTrusted}${isBlocked} **${p.username}** (${p.distance}m)`;
-            }).join(', ');
-            
+        if (threats.length > 0) {
             // If in spawn area and spawn protection is enabled, silently skip disconnect (server restart protection)
-            if (this.safetyConfig.spawnProtection && isInSpawnArea && threats.length > 0) {
+            if (this.safetyConfig.spawnProtection && isInSpawnArea) {
                 return;
             }
             
-            // Auto-disconnect if threatened by unknown players (outside spawn)
-            if (this.safetyConfig.autoDisconnectOnThreat && threats.length > 0) {
+            // Auto-disconnect immediately when untrusted players detected within 50 blocks
+            if (this.safetyConfig.autoDisconnectOnThreat) {
+                this.lastProximityAlert = now;
                 const threatList = threats.map(p => `${p.username} (${p.distance}m)`).join(', ');
                 this.sendSafetyAlert(
                     '🚨 THREAT DETECTED - AUTO DISCONNECT',
-                    `**Untrusted player(s) detected within 20 blocks:**\n${threatList}\n\n**Action:** Bot automatically disconnected for safety!`,
+                    `**Untrusted player(s) detected within 50 blocks:**\n${threatList}\n\n**Action:** Bot automatically disconnected for safety!`,
                     '#ff0000',
                     true
                 );
@@ -625,13 +619,6 @@ class MinecraftDiscordBot {
                 }, 1000);
                 return;
             }
-            
-            this.sendSafetyAlert(
-                '⚠️ Player Proximity Alert',
-                `**${nearbyPlayers.length} player(s) detected within ${this.safetyConfig.proximityRadius} blocks:**\n${playerList}`,
-                '#ff9900',
-                true
-            );
         }
     }
 
